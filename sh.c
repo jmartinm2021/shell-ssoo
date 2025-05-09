@@ -6,12 +6,18 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <glob.h>
+#include <signal.h>
+#include <errno.h>
 
 #define MAX_CMD_LEN 1024
 #define MAX_TOKENS (MAX_CMD_LEN / 2 + 1)
 #define PATH_MAX 4096
 
 int last_result = 0;
+
+// Almacenar pid de procesos en segundo plano
+pid_t background_pids[MAX_CMD_LEN];
+int bg_pid_count = 0;
 
 // Verifica si es builtin
 int
@@ -75,6 +81,26 @@ expandir_globbing(char **args)
 		}
 	}
 	return 1;
+}
+
+void matar_procesos_background() {
+    // Ver si la variable de entorno KILLBACK está declarada
+    if (getenv("KILLBACK") != NULL) {
+        // Recorrer todos los procesos en segundo plano
+        for (int i = 0; i < bg_pid_count; i++) {
+            if (background_pids[i] > 0) {
+                // Intentar matar el proceso con SIGKILL
+                if (kill(background_pids[i], SIGKILL) != 0 && errno != ESRCH) {
+                    perror("Error al terminar proceso");
+                }
+                // Esperar a que el proceso termine para evitar zombies
+                int status;
+                waitpid(background_pids[i], &status, 0);
+            }
+        }
+        // Reiniciar el contador de procesos en segundo plano
+        bg_pid_count = 0;
+    }
 }
 
 // Ejecuta builtin
@@ -222,7 +248,8 @@ ejecutar_externo(char **args, int fd_in, int fd_out, char *in_file,
 				last_result = 1;
 			}
 		} else {
-			printf("[ejecutando en segundo plano] PID: %d\n", pid);
+			background_pids[bg_pid_count++] = pid;
+      printf("[ejecutando en segundo plano] PID: %d\n", pid);
 		}
 		char buf[16];
 
@@ -270,6 +297,14 @@ ejecutar_linea(char *linea)
 		} else if (strcmp(token, "&") == 0) {
 			// Background flag
 			bg = 1;
+		} else if (strchr(token, '=') != NULL) {
+			// eq_pos apunta a la posición del = en el token
+			char *eq_pos = strchr(token, '=');
+
+			// eq_pos ahora es un caracter nulo y token tiene la primera parte (x=y; token = x)
+			*eq_pos = '\0';
+			// Se le asigna a token el valor de lo que hay despues del eq_pos (ahora nada, antes el =), si ya existia se sobreescribe
+			setenv(token, eq_pos + 1, 1);
 		} else {
 			args[i++] = token;
 		}
@@ -289,6 +324,8 @@ ejecutar_linea(char *linea)
 	if (!reemplazar_variables(args)) {
 		return;
 	}
+
+	matar_procesos_background();
 
 	if (es_builtin(args[0])) {
 		ejecutar_builtin(args);
