@@ -83,24 +83,28 @@ expandir_globbing(char **args)
 	return 1;
 }
 
-void matar_procesos_background() {
-    // Ver si la variable de entorno KILLBACK está declarada
-    if (getenv("KILLBACK") != NULL) {
-        // Recorrer todos los procesos en segundo plano
-        for (int i = 0; i < bg_pid_count; i++) {
-            if (background_pids[i] > 0) {
-                // Intentar matar el proceso con SIGKILL
-                if (kill(background_pids[i], SIGKILL) != 0 && errno != ESRCH) {
-                    perror("Error al terminar proceso");
-                }
-                // Esperar a que el proceso termine para evitar zombies
-                int status;
-                waitpid(background_pids[i], &status, 0);
-            }
-        }
-        // Reiniciar el contador de procesos en segundo plano
-        bg_pid_count = 0;
-    }
+void
+matar_procesos_background()
+{
+	// Ver si la variable de entorno KILLBACK está declarada
+	if (getenv("KILLBACK") != NULL) {
+		// Recorrer todos los procesos en segundo plano
+		for (int i = 0; i < bg_pid_count; i++) {
+			if (background_pids[i] > 0) {
+				// Intentar matar el proceso con SIGKILL
+				if (kill(background_pids[i], SIGKILL) != 0
+				    && errno != ESRCH) {
+					perror("Error al terminar proceso");
+				}
+				// Esperar a que el proceso termine para evitar zombies
+				int status;
+
+				waitpid(background_pids[i], &status, 0);
+			}
+		}
+		// Reiniciar el contador de procesos en segundo plano
+		bg_pid_count = 0;
+	}
 }
 
 // Ejecuta builtin
@@ -249,7 +253,7 @@ ejecutar_externo(char **args, int fd_in, int fd_out, char *in_file,
 			}
 		} else {
 			background_pids[bg_pid_count++] = pid;
-      printf("[ejecutando en segundo plano] PID: %d\n", pid);
+			printf("[ejecutando en segundo plano] PID: %d\n", pid);
 		}
 		char buf[16];
 
@@ -272,6 +276,9 @@ ejecutar_linea(char *linea)
 	int fd_in = -1;
 	int fd_out = -1;
 	int bg = 0;
+
+	int here_document = 0;
+	char here_buffer[MAX_CMD_LEN * 10] = { 0 };
 
 	while (token && i < MAX_TOKENS - 1) {
 		// Si hay redireccion de entrada y hay siguiente token se intenta abrir como lectura, si hay de salida se abre para escritura
@@ -311,6 +318,31 @@ ejecutar_linea(char *linea)
 		token = strtok_r(NULL, " \t\r\n", &saveptr);
 	}
 
+	// Si la linea de comando termina en HERE{ y si no hay ni redirecciones ni bg
+	if (i > 0 && strcmp(args[i - 1], "HERE{") == 0) {
+		if (fd_in != -1 || fd_out != -1 || bg) {
+			fprintf(stderr,
+				"HERE{ no puede combinarse con redirección de entrada o ejecución en segundo plano.\n");
+			return;
+		}
+		// Borra el HERE{
+		args[i - 1] = NULL;
+		here_document = 1;
+		printf("--> ");
+		fflush(stdout);
+		char temp_line[MAX_CMD_LEN];
+
+		// Lee todas las lineas y las va almacenando en un buffer temporal hasta que se detecta el }
+		while (fgets(temp_line, sizeof(temp_line), stdin)) {
+			if (strcmp(temp_line, "}\n") == 0)
+				break;
+			strncat(here_buffer, temp_line,
+				sizeof(here_buffer) - strlen(here_buffer) - 1);
+			printf("--> ");
+			fflush(stdout);
+		}
+	}
+
 	args[i] = NULL;
 
 	// Expansión de globbing
@@ -330,7 +362,25 @@ ejecutar_linea(char *linea)
 	if (es_builtin(args[0])) {
 		ejecutar_builtin(args);
 	} else {
-		ejecutar_externo(args, fd_in, fd_out, in_file, out_file, bg);
+		if (here_document) {
+			// Crea un pipe para comunicar el contenido del here (0 --> leer) (1 --> escritura)
+			int pipefd[2];
+
+			if (pipe(pipefd) == -1) {
+				perror("pipe");
+				return;
+			}
+			// Escribe en el extremo de escritura del pipe el contenido del here
+			write(pipefd[1], here_buffer, strlen(here_buffer));
+			close(pipefd[1]);
+			// Ejecuta el comando externo pasando como entrada estándar (fd_in)
+			ejecutar_externo(args, pipefd[0], fd_out, NULL,
+					 out_file, bg);
+			close(pipefd[0]);
+		} else {
+			ejecutar_externo(args, fd_in, fd_out, in_file, out_file,
+					 bg);
+		}
 	}
 }
 
