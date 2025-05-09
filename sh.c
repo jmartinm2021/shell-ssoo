@@ -1,0 +1,320 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <glob.h>
+
+#define MAX_CMD_LEN 1024
+#define MAX_TOKENS (MAX_CMD_LEN / 2 + 1)
+#define PATH_MAX 4096
+
+int last_result = 0;
+
+// Verifica si es builtin
+int
+es_builtin(char *cmd)
+{
+	return strcmp(cmd, "cd") == 0 || strcmp(cmd, "exit") == 0;
+}
+
+// Reemplazar variables de entorno
+int
+reemplazar_variables(char **args)
+{
+	for (int i = 0; args[i] != NULL; i++) {
+		char *token = args[i];
+
+		// Ver si el token empieza $ (variable de entorno)
+		if (token[0] == '$') {
+			// Nombre de la variable de entorno 
+			char *var_name = token + 1;
+
+			// Obtiene el valor
+			char *value = getenv(var_name);
+
+			if (value) {
+				args[i] = value;
+			} else {
+				fprintf(stderr,
+					"error: var %s does not exist\n",
+					var_name);
+				return 0;
+			}
+		}
+	}
+	return 1;
+}
+
+// Globbing
+int
+expandir_globbing(char **args)
+{
+	for (int i = 0; args[i] != NULL; i++) {
+		// Verifica si el token contiene algún glob (*  ?  [])
+		if (strpbrk(args[i], "*?[]") != NULL) {
+			glob_t glob_result;
+
+			glob(args[i], 0, NULL, &glob_result);
+
+			if (glob_result.gl_pathc > 0) {
+				// Si hay coincidencias, reemplaza el argumento con los archivos encontrados
+				args[i] = strdup(glob_result.gl_pathv[0]);
+				for (int j = 1; j < glob_result.gl_pathc; j++) {
+					args[i + j] =
+					    strdup(glob_result.gl_pathv[j]);
+				}
+				args[i + glob_result.gl_pathc] = NULL;
+			} else {
+				// Si no hay coincidencias, deja el patrón original
+				args[i] = strdup(args[i]);
+			}
+			globfree(&glob_result);
+		}
+	}
+	return 1;
+}
+
+// Ejecuta builtin
+void
+ejecutar_builtin(char **args)
+{
+	// cd
+	if (strcmp(args[0], "cd") == 0) {
+		// Si no hay argumentos intenta ir al HOME
+		if (args[1] == NULL) {
+			char *home = getenv("HOME");
+
+			// Si no hay HOME, error
+			if (home == NULL) {
+				last_result = 1;
+				setenv("result", "1", 1);
+				fprintf(stderr,
+					"No se pudo determinar el directorio HOME.\n");
+				return;
+			}
+			// SI hay HOME va al HOME
+			if (chdir(home) != 0) {
+				// Si falla el cambio de directorio, se muestra un error
+				last_result = 1;
+				setenv("result", "1", 1);
+				perror("cd");
+			}
+			// Si hay argumentos intenta ir a ese directorio
+		} else if (chdir(args[1]) != 0) {
+			// Si falla el cambio de directorio, se muestra un error
+			last_result = 1;
+			setenv("result", "1", 1);
+			perror("cd");
+		}
+		last_result = 0;
+		setenv("result", "0", 1);
+		// exit
+	} else if (strcmp(args[0], "exit") == 0) {
+		exit(0);
+	}
+}
+
+// Devuelve ruta si el archivo es ejecutable
+char *
+buscar_en_path(const char *cmd)
+{
+	// Obtiene el valor de la variable de entorno PATH
+	char *path_env = getenv("PATH");
+
+	if (!path_env)
+		return NULL;
+
+	// Se guarda una copia y divide por :
+	char *path_copy = strdup(path_env);
+	char *saveptr;
+	char *dir = strtok_r(path_copy, ":", &saveptr);
+
+	// Recorre todos los directorios del PATH
+	while (dir) {
+		// Se crea la ruta del comando de forma [directorio/comando]
+		char full_path[PATH_MAX];
+
+		snprintf(full_path, sizeof(full_path), "%s/%s", dir, cmd);
+
+		// Se comprueba si se peude ejecutar
+		if (access(full_path, X_OK) == 0) {
+			free(path_copy);
+			return strdup(full_path);
+		}
+		// Si no se encuentra, sigue buscando en el siguiente directorio en PATH
+		dir = strtok_r(NULL, ":", &saveptr);
+	}
+
+	free(path_copy);
+	return NULL;
+}
+
+// Ejecuta el comando externo (no builtin)
+void
+ejecutar_externo(char **args, int fd_in, int fd_out, char *in_file,
+		 char *out_file, int bg)
+{
+	pid_t pid = fork();
+
+	if (pid < 0) {
+		perror("fork");
+		return;
+	} else if (pid == 0) {
+		if (fd_in != -1) {
+			// Si se ha especificado un archivo de entrada (fd_in no es -1), redirigimos la entrada estándar
+			if (dup2(fd_in, STDIN_FILENO) == -1) {
+				perror("dup2 (entrada)");
+				exit(1);
+			}
+			close(fd_in);
+		} else if (bg) {
+			// Si está en segundo plano y no se redirigió entrada, se usa /dev/null
+			int dev_null = open("/dev/null", O_RDONLY);
+
+			if (dev_null == -1) {
+				perror("open /dev/null");
+				exit(1);
+			}
+			if (dup2(dev_null, STDIN_FILENO) == -1) {
+				perror("dup2 /dev/null");
+				exit(1);
+			}
+			close(dev_null);
+		}
+		if (fd_out != -1) {
+			// Si se ha especificado un archivo de salida (fd_out no es -1), redirigimos la salida estándar
+			if (dup2(fd_out, STDOUT_FILENO) == -1) {
+				perror("dup2 (salida)");
+				exit(1);
+			}
+			close(fd_out);
+		}
+		// Si existe y se puede ejcutar del tirón
+		if (access(args[0], X_OK) == 0) {
+			execv(args[0], args);
+			perror("execv");
+			exit(1);
+		}
+		// Si no, se busca el path y se ejecuta
+		char *path_cmd = buscar_en_path(args[0]);
+
+		if (path_cmd) {
+			execv(path_cmd, args);
+			perror("execv");
+			free(path_cmd);
+			exit(1);
+		}
+		// No encontrado
+		fprintf(stderr, "Comando no encontrado: %s\n", args[0]);
+		exit(1);
+	} else {
+		if (!bg) {
+			int status;
+
+			// Espera
+			waitpid(pid, &status, 0);
+			if (WIFEXITED(status)) {
+				last_result = WEXITSTATUS(status);
+			} else {
+				last_result = 1;
+			}
+		} else {
+			printf("[ejecutando en segundo plano] PID: %d\n", pid);
+		}
+		char buf[16];
+
+		snprintf(buf, sizeof(buf), "%d", last_result);
+		setenv("result", buf, 1);
+	}
+}
+
+// Tokeniza línea y ejecuta comando
+void
+ejecutar_linea(char *linea)
+{
+	char *args[MAX_TOKENS];
+	int i = 0;
+	char *saveptr;
+	char *token = strtok_r(linea, " \t\r\n", &saveptr);
+	char *in_file = NULL;
+	char *out_file = NULL;
+
+	int fd_in = -1;
+	int fd_out = -1;
+	int bg = 0;
+
+	while (token && i < MAX_TOKENS - 1) {
+		// Si hay redireccion de entrada y hay siguiente token se intenta abrir como lectura, si hay de salida se abre para escritura
+		if (strcmp(token, "<") == 0
+		    && (token = strtok_r(NULL, " \t\r\n", &saveptr))) {
+			fd_in = open(token, O_RDONLY);
+			// Error al abrir
+			if (fd_in < 0) {
+				perror("open");
+				return;
+			}
+			in_file = token;
+		} else if (strcmp(token, ">") == 0
+			   && (token = strtok_r(NULL, " \t\r\n", &saveptr))) {
+			fd_out =
+			    open(token, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			// Error al abrir
+			if (fd_out < 0) {
+				perror("open");
+				return;
+			}
+			out_file = token;
+		} else if (strcmp(token, "&") == 0) {
+			// Background flag
+			bg = 1;
+		} else {
+			args[i++] = token;
+		}
+		token = strtok_r(NULL, " \t\r\n", &saveptr);
+	}
+
+	args[i] = NULL;
+
+	// Expansión de globbing
+	expandir_globbing(args);
+
+	// Linea vacia
+	if (args[0] == NULL)
+		return;
+
+	// Solo continua la ejecucion si se consigue asignar la variable de entorno
+	if (!reemplazar_variables(args)) {
+		return;
+	}
+
+	if (es_builtin(args[0])) {
+		ejecutar_builtin(args);
+	} else {
+		ejecutar_externo(args, fd_in, fd_out, in_file, out_file, bg);
+	}
+}
+
+int
+main()
+{
+	char linea[MAX_CMD_LEN];
+
+	setenv("result", "0", 1);
+	while (1) {
+		printf("> ");
+		fflush(stdout);
+
+		if (!fgets(linea, sizeof(linea), stdin)) {
+			// EOF o error
+			break;
+		}
+
+		ejecutar_linea(linea);
+	}
+
+	printf("\n");
+	return 0;
+}
