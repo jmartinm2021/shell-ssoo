@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <glob.h>
 
 #define MAX_CMD_LEN 1024
 #define MAX_TOKENS (MAX_CMD_LEN / 2 + 1)
@@ -47,14 +48,46 @@ reemplazar_variables(char **args)
 	return 1;
 }
 
+// Globbing
+int
+expandir_globbing(char **args)
+{
+	for (int i = 0; args[i] != NULL; i++) {
+		// Verifica si el token contiene algún glob (*  ?  [])
+		if (strpbrk(args[i], "*?[]") != NULL) {
+			glob_t glob_result;
+
+			glob(args[i], 0, NULL, &glob_result);
+
+			if (glob_result.gl_pathc > 0) {
+				// Si hay coincidencias, reemplaza el argumento con los archivos encontrados
+				args[i] = strdup(glob_result.gl_pathv[0]);
+				for (int j = 1; j < glob_result.gl_pathc; j++) {
+					args[i + j] =
+					    strdup(glob_result.gl_pathv[j]);
+				}
+				args[i + glob_result.gl_pathc] = NULL;
+			} else {
+				// Si no hay coincidencias, deja el patrón original
+				args[i] = strdup(args[i]);
+			}
+			globfree(&glob_result);
+		}
+	}
+	return 1;
+}
+
 // Ejecuta builtin
 void
 ejecutar_builtin(char **args)
 {
+	// cd
 	if (strcmp(args[0], "cd") == 0) {
+		// Si no hay argumentos intenta ir al HOME
 		if (args[1] == NULL) {
 			char *home = getenv("HOME");
 
+			// Si no hay HOME, error
 			if (home == NULL) {
 				last_result = 1;
 				setenv("result", "1", 1);
@@ -62,18 +95,23 @@ ejecutar_builtin(char **args)
 					"No se pudo determinar el directorio HOME.\n");
 				return;
 			}
+			// SI hay HOME va al HOME
 			if (chdir(home) != 0) {
+				// Si falla el cambio de directorio, se muestra un error
 				last_result = 1;
 				setenv("result", "1", 1);
 				perror("cd");
 			}
+			// Si hay argumentos intenta ir a ese directorio
 		} else if (chdir(args[1]) != 0) {
+			// Si falla el cambio de directorio, se muestra un error
 			last_result = 1;
 			setenv("result", "1", 1);
 			perror("cd");
 		}
 		last_result = 0;
 		setenv("result", "0", 1);
+		// exit
 	} else if (strcmp(args[0], "exit") == 0) {
 		exit(0);
 	}
@@ -83,23 +121,30 @@ ejecutar_builtin(char **args)
 char *
 buscar_en_path(const char *cmd)
 {
+	// Obtiene el valor de la variable de entorno PATH
 	char *path_env = getenv("PATH");
 
 	if (!path_env)
 		return NULL;
 
+	// Se guarda una copia y divide por :
 	char *path_copy = strdup(path_env);
 	char *saveptr;
 	char *dir = strtok_r(path_copy, ":", &saveptr);
 
+	// Recorre todos los directorios del PATH
 	while (dir) {
+		// Se crea la ruta del comando de forma [directorio/comando]
 		char full_path[PATH_MAX];
 
 		snprintf(full_path, sizeof(full_path), "%s/%s", dir, cmd);
+
+		// Se comprueba si se peude ejecutar
 		if (access(full_path, X_OK) == 0) {
 			free(path_copy);
 			return strdup(full_path);
 		}
+		// Si no se encuentra, sigue buscando en el siguiente directorio en PATH
 		dir = strtok_r(NULL, ":", &saveptr);
 	}
 
@@ -119,6 +164,7 @@ ejecutar_externo(char **args, int fd_in, int fd_out, char *in_file,
 		return;
 	} else if (pid == 0) {
 		if (fd_in != -1) {
+			// Si se ha especificado un archivo de entrada (fd_in no es -1), redirigimos la entrada estándar
 			if (dup2(fd_in, STDIN_FILENO) == -1) {
 				perror("dup2 (entrada)");
 				exit(1);
@@ -139,6 +185,7 @@ ejecutar_externo(char **args, int fd_in, int fd_out, char *in_file,
 			close(dev_null);
 		}
 		if (fd_out != -1) {
+			// Si se ha especificado un archivo de salida (fd_out no es -1), redirigimos la salida estándar
 			if (dup2(fd_out, STDOUT_FILENO) == -1) {
 				perror("dup2 (salida)");
 				exit(1);
@@ -199,9 +246,6 @@ ejecutar_linea(char *linea)
 	int fd_out = -1;
 	int bg = 0;
 
-	int here_document = 0;
-	char here_buffer[MAX_CMD_LEN * 10] = { 0 };
-
 	while (token && i < MAX_TOKENS - 1) {
 		// Si hay redireccion de entrada y hay siguiente token se intenta abrir como lectura, si hay de salida se abre para escritura
 		if (strcmp(token, "<") == 0
@@ -226,46 +270,16 @@ ejecutar_linea(char *linea)
 		} else if (strcmp(token, "&") == 0) {
 			// Background flag
 			bg = 1;
-		} else if (strchr(token, '=') != NULL) {
-			// eq_pos apunta a la posición del = en el token
-			char *eq_pos = strchr(token, '=');
-
-			// eq_pos ahora es un caracter nulo y token tiene la primera parte (x=y; token = x)
-			*eq_pos = '\0';
-			// Se le asigna a token el valor de lo que hay despues del eq_pos (ahora nada, antes el =), si ya existia se sobreescribe
-			setenv(token, eq_pos + 1, 1);
 		} else {
 			args[i++] = token;
 		}
 		token = strtok_r(NULL, " \t\r\n", &saveptr);
 	}
 
-	// Si la linea de comando termina en HERE{ y si no hay ni redirecciones ni bg
-	if (i > 0 && strcmp(args[i - 1], "HERE{") == 0) {
-		if (fd_in != -1 || fd_out != -1 || bg) {
-			fprintf(stderr,
-				"HERE{ no puede combinarse con redirección de entrada o ejecución en segundo plano.\n");
-			return;
-		}
-		// Borra el HERE{
-		args[i - 1] = NULL;
-		here_document = 1;
-		printf("--> ");
-		fflush(stdout);
-		char temp_line[MAX_CMD_LEN];
-
-		// Lee todas las lineas y las va almacenando en un buffer temporal hasta que se detecta el }
-		while (fgets(temp_line, sizeof(temp_line), stdin)) {
-			if (strcmp(temp_line, "}\n") == 0)
-				break;
-			strncat(here_buffer, temp_line,
-				sizeof(here_buffer) - strlen(here_buffer) - 1);
-			printf("--> ");
-			fflush(stdout);
-		}
-	}
-
 	args[i] = NULL;
+
+	// Expansión de globbing
+	expandir_globbing(args);
 
 	// Linea vacia
 	if (args[0] == NULL)
@@ -276,49 +290,10 @@ ejecutar_linea(char *linea)
 		return;
 	}
 
-	if (strcmp(args[0], "ifok") == 0 || strcmp(args[0], "ifnot") == 0) {
-		int ejecutar = (strcmp(args[0], "ifok") == 0
-				&& last_result == 0)
-		    || (strcmp(args[0], "ifnot") == 0 && last_result != 0);
-
-		if (!args[1])
-			return;
-
-		if (ejecutar) {
-			// Ejecutar directamente los argumentos restantes
-			char **subargs = &args[1];
-
-			if (es_builtin(subargs[0])) {
-				ejecutar_builtin(subargs);
-			} else {
-				ejecutar_externo(subargs, fd_in, fd_out,
-						 in_file, out_file, bg);
-			}
-		}
-		return;
-	}
 	if (es_builtin(args[0])) {
 		ejecutar_builtin(args);
 	} else {
-		if (here_document) {
-			// Crea un pipe para comunicar el contenido del here (0 --> leer) (1 --> escritura)
-			int pipefd[2];
-
-			if (pipe(pipefd) == -1) {
-				perror("pipe");
-				return;
-			}
-			// Escribe en el extremo de escritura del pipe el contenido del here
-			write(pipefd[1], here_buffer, strlen(here_buffer));
-			close(pipefd[1]);
-			// Ejecuta el comando externo pasando como entrada estándar (fd_in)
-			ejecutar_externo(args, pipefd[0], fd_out, NULL,
-					 out_file, bg);
-			close(pipefd[0]);
-		} else {
-			ejecutar_externo(args, fd_in, fd_out, in_file, out_file,
-					 bg);
-		}
+		ejecutar_externo(args, fd_in, fd_out, in_file, out_file, bg);
 	}
 }
 
