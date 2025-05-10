@@ -19,11 +19,14 @@ int last_result = 0;
 pid_t background_pids[MAX_CMD_LEN];
 int bg_pid_count = 0;
 
+// Contador de forks
+int fork_counter = 0;
+
 // Verifica si es builtin
 int
 es_builtin(char *cmd)
 {
-	return strcmp(cmd, "cd") == 0 || strcmp(cmd, "exit") == 0 || strcmp(cmd, "pidsbg") == 0;
+	return strcmp(cmd, "cd") == 0 || strcmp(cmd, "exit") == 0 || strcmp(cmd, "pidsbg") == 0 || strcmp(cmd, "nforks") == 0;
 }
 
 // Reemplazar variables de entorno
@@ -147,16 +150,37 @@ ejecutar_builtin(char **args)
 	} else if (strcmp(args[0], "pidsbg") == 0) {
 		// Si tiene mas de un argumento
 		if (args[1] != NULL) {
-		fprintf(stderr,
+			fprintf(stderr,
 					"usage: pidsbg\n");
-				return;
+			last_result = 1;
+			setenv("result", "1", 1);
+			return;
 		}
 
+		// Recorre el array de pids en segudno plano y los va imprimiendo
 		for (int i = 0; i < bg_pid_count; i++) {
 			if (background_pids[i] > 0) {
 				fprintf(stdout, "%d\n", background_pids[i]);
 			}
 		}
+		last_result = 0;
+		setenv("result", "0", 1);
+	} else if (strcmp(args[0], "nforks") == 0) {
+		// Sin arguemntos imprime el numero de forks hasta el momento
+		if (args[1] == NULL) {
+			fprintf(stdout, "%d\n", fork_counter);
+		// Si el argumento es -r, resetea el contador
+		} else if (strcmp(args[1], "-r") == 0) {
+			fork_counter = 0;
+		// Si no, error
+		} else {
+			fprintf(stderr,
+					"usage: nforks [-r]\n");
+			last_result = 1;
+			setenv("result", "1", 1);
+			return;
+		}
+
 		last_result = 0;
 		setenv("result", "0", 1);
 	}
@@ -203,6 +227,8 @@ ejecutar_externo(char **args, int fd_in, int fd_out, char *in_file,
 		 char *out_file, int bg)
 {
 	pid_t pid = fork();
+	// Contador de forks
+	fork_counter++;
 
 	if (pid < 0) {
 		perror("fork");
