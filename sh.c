@@ -23,7 +23,7 @@ int bg_pid_count = 0;
 int
 es_builtin(char *cmd)
 {
-	return strcmp(cmd, "cd") == 0 || strcmp(cmd, "exit") == 0;
+	return strcmp(cmd, "cd") == 0 || strcmp(cmd, "exit") == 0 || strcmp(cmd, "pidsbg") == 0;
 }
 
 // Reemplazar variables de entorno
@@ -144,6 +144,21 @@ ejecutar_builtin(char **args)
 		// exit
 	} else if (strcmp(args[0], "exit") == 0) {
 		exit(0);
+	} else if (strcmp(args[0], "pidsbg") == 0) {
+		// Si tiene mas de un argumento
+		if (args[1] != NULL) {
+		fprintf(stderr,
+					"usage: pidsbg\n");
+				return;
+		}
+
+		for (int i = 0; i < bg_pid_count; i++) {
+			if (background_pids[i] > 0) {
+				fprintf(stdout, "%d\n", background_pids[i]);
+			}
+		}
+		last_result = 0;
+		setenv("result", "0", 1);
 	}
 }
 
