@@ -1,0 +1,112 @@
+# Comandos básicos
+echo Hola mundo
+ls
+pwd
+
+
+# Redirecciones
+ls > salida.txt
+wc < salida.txt > cuenta.txt
+cat < cuenta.txt
+
+
+# Segundo plano (&)
+sleep 5 &
+echo Hola
+ps
+
+
+# Builtin cd
+pwd
+cd /tmp
+pwd
+cd
+pwd
+
+
+# Variables de entorno
+cmd=ls
+arg=/tmp
+$cmd $arg
+echo $patata
+
+
+# Espaciado flexible
+   ls     -l     >     salida.txt
+echo       hola      mundo     >salida.txt
+
+
+# Ejecución desde fichero (deberia hacer un ls /tmp)
+./sh < script
+
+---------------Script-------------------
+echo script mode
+pwd
+cmd=ls
+arg=/tmp
+$cmd $arg > listado.txt
+----------------------------------------
+
+
+# HERE Document (opcional I)
+wc -l HERE{
+una y
+otra lin.
+}
+
+
+# Variable result y ifok / ifnot (opcional II)
+false
+echo $result
+false
+ifnot echo Hola
+false
+ifok echo Hola
+
+true
+echo $result
+true
+ifok echo Hola
+true
+ifnot echo Hola
+
+
+# Globbing (opcional III)
+touch myzz test1.txt test2.txt test3.txt test4.txt
+ls *zz
+ls test?.txt
+ls test[1-3].txt
+
+
+# KILLBACK (ordinaria 2023-2024)
+sleep 100 &
+ps	(aparece el sleep)
+KILLBACK=1
+echo hola
+ps	(ya no deberia estar el sleep)
+
+
+# pidsbg (extraordinaria 2023-2024)
+ps
+sleep 100 &
+sleep 200 &
+ps
+pidsbg		(deberia imprimir los pid de los bg)
+pidsbg pepe 	(deberia dar error)
+
+
+# nforks (ordinaria 2022-2023)
+ls
+ls
+nforks		(deberia dar 2)
+ls
+nforks		(deberia dar 3)
+nforks -r
+nforks		(deberia dar 0)
+
+
+# historial (extraordinaria 2022-2023)
+ls -l
+sleep 1 &
+echo hola > hola.txt
+cat < /home/longas/.hist_myshell

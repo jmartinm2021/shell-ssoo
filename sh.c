@@ -415,6 +415,28 @@ ejecutar_linea(char *linea)
 
 	matar_procesos_background();
 
+	if (strcmp(args[0], "ifok") == 0 || strcmp(args[0], "ifnot") == 0) {
+		int ejecutar = (strcmp(args[0], "ifok") == 0
+				&& last_result == 0)
+		    || (strcmp(args[0], "ifnot") == 0 && last_result != 0);
+
+		if (!args[1])
+			return;
+
+		if (ejecutar) {
+			// Ejecutar directamente los argumentos restantes
+			char **subargs = &args[1];
+
+			if (es_builtin(subargs[0])) {
+				ejecutar_builtin(subargs);
+			} else {
+				ejecutar_externo(subargs, fd_in, fd_out,
+						 in_file, out_file, bg);
+			}
+		}
+		return;
+	}
+	
 	if (es_builtin(args[0])) {
 		ejecutar_builtin(args);
 	} else {
@@ -453,9 +475,10 @@ main()
 			"Error: No se pudo obtener el directorio HOME.\n");
 		return 1;
 	}
-	// Se crea o trunca ./hist_shell
+	
 	char historial_path[PATH_MAX];
 
+	// Se crea o trunca ./hist_shell
 	snprintf(historial_path, sizeof(historial_path), "%s/.hist_myshell",
 		 home);
 	hist_fd = open(historial_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);

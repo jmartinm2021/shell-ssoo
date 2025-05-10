@@ -1,0 +1,5 @@
+echo script mode
+pwd
+cmd=ls
+arg=/tmp
+$cmd $arg > listado.txt
